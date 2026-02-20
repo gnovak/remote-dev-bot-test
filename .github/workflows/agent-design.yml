@@ -1,0 +1,263 @@
+# ============================================================
+# CONFIGURATION - Remote Dev Bot (Design Mode)
+# ============================================================
+#
+# This is a compiled, self-contained workflow. To customize:
+#
+# - MODEL_CONFIG: Search for this to change the default model or add/modify aliases
+# - PR_STYLE: Search for this to switch between draft and ready PRs
+# - MAX_ITERATIONS: Search for this to adjust how many steps the agent takes
+# - SECURITY_GATE: Search for this to change who can trigger the agent
+#
+# Authentication (optional — bot works without any of these):
+# - Default: github.token is used. Bot posts as github-actions[bot]. No CI on bot PRs.
+# - GitHub App: Set RDB_APP_ID (variable) + RDB_APP_PRIVATE_KEY (secret) for a custom
+#   bot identity and CI triggering on bot PRs.
+# - PAT: Set RDB_PAT_TOKEN (secret) for CI triggering. Bot posts as the PAT owner.
+#
+# Prerequisites:
+# - At least one LLM API key secret: ANTHROPIC_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY
+# - Actions permissions: read/write + allow PR creation
+#
+# ============================================================
+
+name: "Remote Dev Bot \u2014 Design (Compiled)"
+on:
+  issue_comment:
+    types:
+    - created
+  pull_request_review_comment:
+    types:
+    - created
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+jobs:
+  design:
+    runs-on: ubuntu-latest
+    # --- SECURITY_GATE: change who can trigger the agent ---
+    # Current: ["OWNER","COLLABORATOR","MEMBER"]
+    # To restrict to owner only: ["OWNER"]
+    # To allow contributors: ["OWNER","COLLABORATOR","MEMBER","CONTRIBUTOR"]
+    if: (github.event.issue || github.event.pull_request) && startsWith(github.event.comment.body, '/agent-design') && contains(fromJson('["OWNER","COLLABORATOR","MEMBER"]'), github.event.comment.author_association)
+    steps:
+    - name: Generate app token
+      if: vars.RDB_APP_ID != ''
+      uses: actions/create-github-app-token@v1
+      id: app-token
+      with:
+        app-id: ${{ vars.RDB_APP_ID }}
+        private-key: ${{ secrets.RDB_APP_PRIVATE_KEY }}
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ steps.app-token.outputs.token || secrets.RDB_PAT_TOKEN || github.token }}
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+    - name: Parse config and model alias
+      id: parse
+      env:
+        COMMENT: ${{ github.event.comment.body }}
+      run: "python3 << 'PYTHON_EOF'\nimport os\nimport sys\nimport re\n\n# --- MODEL_CONFIG: default model and available aliases ---\n# Change the default model or add/modify aliases below\nMODELS = {\n    \"claude-small\": \"anthropic/claude-sonnet-4-5\",\n    \"claude-large\": \"anthropic/claude-opus-4-5\",\n    \"gpt-small\": \"openai/gpt-5.1-codex-mini\",\n    \"gpt-large\": \"openai/gpt-5.2-codex\",\n    \"gemini-small\": \"gemini/gemini-2.5-flash\",\n    \"gemini-large\": \"gemini/gemini-2.5-pro\",\n}\nDEFAULT_MODEL = \"claude-small\"\n\n# --- MAX_ITERATIONS: how many steps the agent can take ---\nMAX_ITERATIONS = 50\n\n# --- OpenHands version ---\nOH_VERSION = \"1.3.0\"\n\n# --- PR_STYLE: \"draft\" or \"ready\" ---\nPR_TYPE = \"ready\"\n\n# --- COMMIT_TRAILER: appended to commit messages (resolve mode only) ---\n# Supported variables: {model_alias}, {model_id}, {oh_version}\nCOMMIT_TRAILER_TEMPLATE = \"Model: {model_alias} ({model_id}), openhands-ai v{oh_version}\"\n\n# Parse alias\
+        \ from comment \u2014 mode is known at compile time\ncomment = os.environ.get(\"COMMENT\", \"\")\n# Strip the known prefix: \"/agent-design-claude-large do X\" -> \"claude-large\"\nmatch = re.match(r'^/agent-design-?([a-z0-9-]*)', comment)\nalias = match.group(1) if match else \"\"\n\nif not alias:\n    alias = DEFAULT_MODEL\n\nif alias not in MODELS:\n    print(f\"ERROR: Unknown model alias: {alias}. Available: {list(MODELS.keys())}\", file=sys.stderr)\n    sys.exit(1)\n\nmodel = MODELS[alias]\n\n# Resolve commit trailer template\ncommit_trailer = \"\"\nif COMMIT_TRAILER_TEMPLATE:\n    commit_trailer = COMMIT_TRAILER_TEMPLATE.format(\n        model_alias=alias,\n        model_id=model,\n        oh_version=OH_VERSION,\n    )\n\n# Write outputs\noutput_file = os.environ.get(\"GITHUB_OUTPUT\")\nif output_file:\n    with open(output_file, \"a\") as f:\n        f.write(f\"model={model}\\n\")\n        f.write(f\"alias={alias}\\n\")\n        f.write(f\"max_iterations={MAX_ITERATIONS}\\\
+        n\")\n        f.write(f\"oh_version={OH_VERSION}\\n\")\n        f.write(f\"pr_type={PR_TYPE}\\n\")\n        f.write(f\"commit_trailer={commit_trailer}\\n\")\n\n# Log for visibility\nprint(f\"Mode: design\")\nprint(f\"Model alias: {alias}\")\nprint(f\"Model ID: {model}\")\nprint(f\"PR type: {PR_TYPE}\")\nPYTHON_EOF\n"
+    - name: Determine API key
+      id: apikey
+      run: |
+        MODEL="${{ steps.parse.outputs.model }}"
+        if [[ "$MODEL" == anthropic/* ]]; then
+          echo "key=${{ secrets.ANTHROPIC_API_KEY }}" >> "$GITHUB_OUTPUT"
+        elif [[ "$MODEL" == openai/* ]]; then
+          echo "key=${{ secrets.OPENAI_API_KEY }}" >> "$GITHUB_OUTPUT"
+        elif [[ "$MODEL" == gemini/* ]]; then
+          echo "key=${{ secrets.GEMINI_API_KEY }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "::error::Unknown model provider for: $MODEL"
+          exit 1
+        fi
+    - name: React to comment
+      continue-on-error: true
+      run: |
+        gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
+          --method POST --field content=rocket
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.RDB_PAT_TOKEN || github.token }}
+    - name: Assign commenter to issue
+      continue-on-error: true
+      run: |
+        ISSUE_NUMBER=${{ github.event.issue.number || github.event.pull_request.number }}
+        gh issue edit "$ISSUE_NUMBER" --repo "${{ github.repository }}" \
+          --add-assignee "${{ github.event.comment.user.login }}"
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.RDB_PAT_TOKEN || github.token }}
+    - name: Install dependencies
+      run: pip install PyYAML litellm
+    - name: Gather issue context
+      id: context
+      run: |
+        ISSUE_NUMBER=${{ github.event.issue.number || github.event.pull_request.number }}
+
+        # Fetch issue title and body
+        ISSUE_JSON=$(gh api repos/${{ github.repository }}/issues/${ISSUE_NUMBER})
+        ISSUE_TITLE=$(echo "$ISSUE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin)['title'])")
+        ISSUE_BODY=$(echo "$ISSUE_JSON" | python3 -c "import sys,json; print(json.load(sys.stdin).get('body','') or '')")
+
+        # Fetch recent comments (last 10)
+        COMMENTS_JSON=$(gh api "repos/${{ github.repository }}/issues/${ISSUE_NUMBER}/comments?per_page=10&direction=desc")
+        COMMENTS=$(echo "$COMMENTS_JSON" | python3 -c "
+        import sys, json
+        comments = json.load(sys.stdin)
+        for c in reversed(comments):
+            user = c['user']['login']
+            body = c.get('body','')
+            print(f'--- @{user} ---')
+            print(body)
+            print()
+        ")
+
+        # Write to files to avoid shell escaping issues
+        echo "$ISSUE_TITLE" > /tmp/issue_title.txt
+        echo "$ISSUE_BODY" > /tmp/issue_body.txt
+        echo "$COMMENTS" > /tmp/issue_comments.txt
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.RDB_PAT_TOKEN || github.token }}
+    - name: Call LLM for design analysis
+      id: llm
+      env:
+        LLM_API_KEY: ${{ steps.apikey.outputs.key }}
+        ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      run: |
+        python3 << 'PYEOF'
+        import json
+        import os
+        import yaml
+
+        from litellm import completion
+
+        model = "${{ steps.parse.outputs.model }}"
+
+        prompt_prefix = "You are analyzing this issue for design discussion. Do NOT write code or open a PR. Instead, provide thoughtful analysis, surface trade-offs, suggest approaches, and ask clarifying questions. Respond in a GitHub comment. IMPORTANT: Never begin your response with a slash command like /agent or any text that could trigger another bot action. Do NOT end your response with conversational invitations like \"Want me to elaborate?\" or \"Let me know if you have questions.\" Your response is a design document, not a chat message. IMPORTANT: You have been given a limited set of context files. If the issue touches code or behavior you cannot verify from those files, say so explicitly. Do NOT invent function names, describe behavior you haven't seen, or assume how unshared code works. Acknowledging what you cannot see is more useful than a confident answer based on guesses.\n"
+
+        # Generate repository file listing (tracked files only)
+        import subprocess
+        result = subprocess.run(
+            ["git", "ls-files"],
+            capture_output=True, text=True
+        )
+        file_listing = result.stdout.strip()
+        repo_context = f"## Repository File Listing\n\n```\n{file_listing}\n```"
+
+        # Read repo context files (missing files are skipped gracefully)
+        context_files = ['README.md', 'CONTRIBUTING.md', 'AGENTS.md', 'CLAUDE.md', '.gemini/GEMINI.md', '.openhands/microagents/repo.md', 'how-it-works.md']
+        for filepath in context_files:
+            if os.path.exists(filepath):
+                with open(filepath) as f:
+                    content = f.read().strip()
+                if content:
+                    repo_context += f"\n\n## File: {filepath}\n\n{content}"
+
+        # Read issue context
+        with open("/tmp/issue_title.txt") as f:
+            title = f.read().strip()
+        with open("/tmp/issue_body.txt") as f:
+            body = f.read().strip()
+        with open("/tmp/issue_comments.txt") as f:
+            comments = f.read().strip()
+
+        # Build the prompt
+        user_content = f"""## Issue: {title}
+
+        {body}
+
+        ## Discussion so far:
+        {comments}
+        """
+
+        system_prompt = prompt_prefix or (
+            "You are analyzing a GitHub issue for design discussion. "
+            "Provide thoughtful analysis, surface trade-offs, suggest approaches, "
+            "and ask clarifying questions. Format your response as markdown suitable "
+            "for a GitHub comment. "
+            "IMPORTANT: Never begin your response with a slash command like /agent "
+            "or any text that could trigger another bot action."
+        )
+
+        if repo_context:
+            system_prompt = "# Repository Context\n" + repo_context + "\n\n# Instructions\n\n" + system_prompt
+
+        response = completion(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            max_tokens=4096,
+        )
+
+        result = response.choices[0].message.content
+
+        # Extract token usage for cost tracking
+        usage = getattr(response, 'usage', None)
+        if usage:
+            input_tokens = getattr(usage, 'prompt_tokens', 0)
+            output_tokens = getattr(usage, 'completion_tokens', 0)
+            # litellm may provide cost directly
+            cost = getattr(response, '_hidden_params', {}).get('response_cost', None)
+            if cost is None:
+                # Try to get from usage
+                cost = getattr(usage, 'cost', None)
+        else:
+            input_tokens = 0
+            output_tokens = 0
+            cost = None
+
+        # Save usage info for cost comment
+        import json
+        usage_data = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cost": cost,
+            "model": model,
+        }
+        with open("/tmp/llm_usage.json", "w") as f:
+            json.dump(usage_data, f)
+        print(f"Token usage: input={input_tokens}, output={output_tokens}, cost={cost}")
+
+        # Loop prevention: detect /agent commands anywhere in the response
+        # If found, block the entire response to prevent recursive triggers
+        import re
+        agent_pattern = re.compile(r'^/agent', re.MULTILINE)
+        if agent_pattern.search(result):
+            print("=" * 60)
+            print("BLOCKED: Response contains /agent command(s)")
+            print("=" * 60)
+            print("Full response (for debugging):")
+            print(result)
+            print("=" * 60)
+            # Signal to the post step that this response should be blocked
+            with open("/tmp/llm_blocked", "w") as f:
+                f.write("true")
+            with open("/tmp/llm_response.md", "w") as f:
+                f.write("")  # Empty - won't be used
+        else:
+            # Write to file (avoid shell escaping)
+            with open("/tmp/llm_response.md", "w") as f:
+                f.write(result)
+            print(f"Generated {len(result)} chars of design analysis")
+        PYEOF
+    - name: Post comment
+      run: "ISSUE_NUMBER=${{ github.event.issue.number || github.event.pull_request.number }}\nMODE=\"${{ steps.parse.outputs.mode }}\"\nALIAS=\"${{ steps.parse.outputs.alias }}\"\nMODEL=\"${{ steps.parse.outputs.model }}\"\nRUN_URL=\"${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\"\n\n# Check if the response was blocked due to /agent command detection\nif [ -f /tmp/llm_blocked ]; then\n  echo \"\u26A0\uFE0F Response blocked due to /agent command detection\"\n  {\n    echo \"\u26A0\uFE0F **Agent loop blocked!**\"\n    echo \"\"\n    echo \"The design analysis response contained \\`/agent\\` command(s) which could trigger a recursive agent loop. The response has been blocked for safety.\"\n    echo \"\"\n    echo \"See the [workflow run logs]($RUN_URL) for the full response content.\"\n    echo \"\"\n    echo \"---\"\n    echo \"_Blocked by \\`/agent-${MODE}-${ALIAS}\\` (${MODEL}) safety check_\"\n  } > /tmp/comment_body.md\nelse\n  # Add footer with metadata\n\
+        \  {\n    cat /tmp/llm_response.md\n    echo \"\"\n    echo \"---\"\n    echo \"_Design analysis by \\`/agent-${MODE}-${ALIAS}\\` (${MODEL})_\"\n  } > /tmp/comment_body.md\nfi\n\ngh issue comment \"$ISSUE_NUMBER\" \\\n  --repo \"${{ github.repository }}\" \\\n  --body-file /tmp/comment_body.md\n"
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.RDB_PAT_TOKEN || github.token }}
+    - name: Post cost comment
+      if: always()
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token || secrets.RDB_PAT_TOKEN || github.token }}
+      run: "ISSUE_NUMBER=${{ github.event.issue.number || github.event.pull_request.number }}\nMODEL=\"${{ steps.parse.outputs.model }}\"\nALIAS=\"${{ steps.parse.outputs.alias }}\"\nMODE=\"${{ steps.parse.outputs.mode }}\"\n\n# Read usage data \u2014 default to 0 if file missing (shows $0.00, signals no data)\nread INPUT_TOKENS OUTPUT_TOKENS COST < <(python3 -c \"\nimport json, os\nif os.path.exists('/tmp/llm_usage.json'):\n    d = json.load(open('/tmp/llm_usage.json'))\n    print(d.get('input_tokens', 0), d.get('output_tokens', 0), d.get('cost') or 0)\nelse:\n    print(0, 0, 0)\n\")\nTOTAL_TOKENS=$((INPUT_TOKENS + OUTPUT_TOKENS))\n\n# Round UP to nearest penny \u2014 $0.00 means no cost data was available.\n# Ceiling (not standard) rounding: sub-penny costs show as $0.01.\n# Two decimal places only: pennies are the natural unit for LLM cost tracking.\nROUNDED=$(python3 -c \"import math; print(f'{math.ceil(float(\\\"${COST:-0}\\\") * 100) / 100:.2f}')\")\n\n# Format cost comment\n{\n  echo\
+        \ \"### \U0001F4B0 Cost Summary\"\n  echo \"\"\n  echo \"**Model:** \\`${ALIAS}\\` (${MODEL})\"\n  echo \"**Mode:** ${MODE}\"\n  echo \"\"\n  echo \"| Metric | Value |\"\n  echo \"|--------|-------|\"\n  echo \"| Input tokens | ${INPUT_TOKENS} |\"\n  echo \"| Output tokens | ${OUTPUT_TOKENS} |\"\n  echo \"| Total tokens | ${TOTAL_TOKENS} |\"\n  printf \"| **Estimated cost** | **\\$%s** |\\n\" \"$ROUNDED\"\n  echo \"\"\n  echo \"_Cost is estimated based on token usage and may vary from actual billing._\"\n} > /tmp/cost_comment.md\n\n# Post comment\ngh issue comment \"$ISSUE_NUMBER\" \\\n  --repo \"${{ github.repository }}\" \\\n  --body-file /tmp/cost_comment.md\n"
