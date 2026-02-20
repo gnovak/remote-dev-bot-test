@@ -1,0 +1,3 @@
+
+def wave():
+    return 'Wave!'
