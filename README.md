@@ -4,5 +4,5 @@
 
 ```python
 def rf_stub():
-    return None
+    return 'hello world'
 ```
