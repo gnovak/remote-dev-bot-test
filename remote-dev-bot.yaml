@@ -1,7 +1,6 @@
 # remote-dev-bot config for rdb-test
 # This repo is used as the test target for e2e runs.
 # Disable assignment so test issues/PRs are not assigned to the triggering user.
-openhands:
+agent:
   assign_issue: false
   assign_pr: false
-
