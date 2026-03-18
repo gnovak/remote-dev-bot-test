@@ -1,6 +1,16 @@
-# remote-dev-bot config for rdb-test
-# This repo is used as the test target for e2e runs.
-# Disable assignment so test issues/PRs are not assigned to the triggering user.
+# rdb-test repo config — keep testing cheap.
+# Base config at gnovak/remote-dev-bot defines all modes and models.
+# Override only what needs to differ for a test repo.
+
 agent:
   assign_issue: false
   assign_pr: false
+
+modes:
+  workshop:
+    council:
+      - claude-small    # Single model council keeps e2e tests cheap
+
+  build:
+    council:
+      - claude-small    # Single model council keeps e2e tests cheap
