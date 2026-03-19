@@ -15,3 +15,10 @@ Co-Authored-By: <Your Model Name and Version> <noreply@your-provider.com>
 ```
 
 Fill in your actual model name, version, and your provider's noreply address.
+
+## gemini-large
+
+```python
+def hello_gemini_large():
+    return 'Hello from gemini-large!'
+```
