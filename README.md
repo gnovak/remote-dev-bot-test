@@ -9,5 +9,5 @@ resolve them. The issues are intentionally simple.
 
 ```python
 def rf_stub():
-    return None
+    return 'hello world'
 ```
