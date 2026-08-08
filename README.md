@@ -6,5 +6,5 @@ This is the test repository for [remote-dev-bot](https://github.com/gnovak/remot
 
 ```python
 def rf_stub():
-    return None
+    return 'hello world'
 ```
